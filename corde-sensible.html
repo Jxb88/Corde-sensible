@@ -32,7 +32,7 @@
   --staff: #A39077; --pill: #F4EBD9; --pill-ink: #1E1411; --wood: #4A3226; --pearl: #F4EBD9; --band: rgba(255, 178, 56, .12);
   color-scheme: dark;
 }
-*, *::before, *::after { box-sizing: inherit; }
+*, *::before, *::after { box-sizing: border-box; }
 html { height: 100%; scroll-padding-top: env(safe-area-inset-top, 0px); -webkit-text-size-adjust: 100%; }
 body { margin: 0; min-height: 100%; background: var(--bg); color: var(--ink); font: 400 16px/1.45 var(--fb); -webkit-tap-highlight-color: transparent; }
 body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bg); }
@@ -98,6 +98,18 @@ button { cursor: pointer; }
 .star { fill: none; stroke: currentColor; stroke-width: 1.6; opacity: .45; }
 .star.on { fill: currentColor; opacity: 1; }
 .p-tol { padding: 0 26px 14px; font-size: .8125rem; opacity: .75; }
+.songs { margin-top: 28px; }
+.songs h2 { margin-bottom: 4px; }
+.song { margin-top: 10px; border-radius: 12px; background: var(--surface); border: 1px solid var(--hair); }
+.song[open] { padding-bottom: 4px; }
+.song summary { list-style: none; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; cursor: pointer; }
+.song summary::-webkit-details-marker { display: none; }
+.song-t { font: 700 1.5rem/1.1 var(--fd); }
+.song-t small { display: block; font: 400 .8125rem/1.3 var(--fb); color: var(--ink2); margin-top: 3px; }
+.song .chip { flex: none; background: var(--bg); }
+.song .row { grid-template-columns: 1fr auto; padding: 8px 14px; border-top-color: var(--hair); }
+.song .row::before { content: none; }
+.row-t small { display: block; font-size: .8125rem; font-weight: 400; color: var(--ink2); }
 .mine { margin-top: 26px; }
 .mine h2 { margin-bottom: 8px; }
 .mine .row { border-top-color: var(--hair); }
@@ -437,7 +449,7 @@ const DSP = (() => {
       this.skh = Math.ceil(1200 * this.sfN / fs2);
       this.sc = [0, 1, 2].map(() => new Float32Array(this.sk1 + 1)); this.sci = 0; this.scn = 0;
       this.onsetLag = 0.012;            // retard moyen du détecteur, mesuré sur signaux de synthèse
-      this.novelty = 0; this.weak = []; this.pend = null;
+      this.novelty = 0; this.weak = []; this.pend = null; this.wrefr = 0; this.warmed = true;
       this.level = 0;
       this.frames = []; this.onsets = []; this.onsetId = 0;
       this.tBase = 0; this.cBase = 0;
@@ -488,20 +500,22 @@ const DSP = (() => {
       const S = Math.max(den > 0 ? num / den / 0.30 : 0, denH > 0 ? numH / denH / 0.26 : 0);
       this.novelty = S;
       if (this.refr > 0) this.refr--;
-      if (S < 0.6) this.armed = true;
+      if (this.wrefr > 0) this.wrefr--;
+      if (S < 0.6) { this.armed = true; this.warmed = true; }
       const loud = Math.max(e, ePrev) > gate;
       if (S >= 1 && this.armed && this.refr === 0 && loud) {
         const n = this.count - Math.round(this.onsetLag * this.fs2);
         this.onsets.push({ id: ++this.onsetId, t: this.timeOf(n), n, e, s: S, used: false });
         if (this.onsets.length > 240) this.onsets.splice(0, 120);
         this.refr = this.refrBlocks; this.armed = false; this.pend = null;
+        this.wrefr = this.refrBlocks; this.warmed = false;
       } else if (this.pend) {
         /* attaque faible : nouveauté nette mais sous le seuil, gardée à part pour les leçons de rythme */
         if (--this.pend.left <= 0) {
           this.weak.push(this.pend.o); if (this.weak.length > 240) this.weak.splice(0, 120);
-          this.pend = null; this.refr = this.refrBlocks; this.armed = false;
+          this.pend = null; this.wrefr = this.refrBlocks; this.warmed = false;
         }
-      } else if (S >= 0.85 && this.armed && this.refr === 0 && loud) {
+      } else if (S >= 0.85 && this.warmed && this.wrefr === 0 && this.refr === 0 && loud) {
         const n = this.count - Math.round(this.onsetLag * this.fs2);
         this.pend = { left: 3, o: { id: ++this.onsetId, t: this.timeOf(n), n, e, s: S, used: false, weak: true } };
       }
@@ -651,16 +665,17 @@ const DIFFICULTY = [
 ];
 
 /* Mini-notation pour écrire les leçons : « 6:0 » corde 6 à vide, « Em » accord, « - » silence,
-   « *2 » deux temps, « /2 » un demi-temps, « ^ » coup vers le haut, « ~ » rythme seul. */
+   « *2 » deux temps, « /2 » un demi-temps, « ^ » coup vers le haut, « ~ » rythme seul,
+   « 5:3+4:2 » plusieurs cordes grattées ensemble. */
 function seq(str) {
   const out = []; let t = 0;
-  for (const tok of str.split(/\s+/)) {
-    if (!tok || tok === '|') continue;
-    const m = /^(-|\d:\d+|[A-G][#b]?m?)(?:\*([\d.]+)|\/(\d+))?([\^~]*)$/.exec(tok);
+  for (const tok of str.replace(/\|/g, ' ').split(/\s+/)) {
+    if (!tok) continue;
+    const m = /^(-|\d:\d+(?:\+\d:\d+)*|[A-G][#b]?m?)(?:\*([\d.]+)|\/(\d+))?([\^~]*)$/.exec(tok);
     if (!m) throw new Error('Jeton invalide : ' + tok);
     const d = m[2] ? parseFloat(m[2]) : m[3] ? 1 / parseInt(m[3], 10) : 1;
     if (m[1] !== '-') {
-      if (m[1].indexOf(':') > 0) { const p = m[1].split(':'); out.push({ t, d, s: +p[0], f: +p[1] }); }
+      if (m[1].indexOf(':') > 0) m[1].split('+').forEach((x) => { const p = x.split(':'); out.push({ t, d, s: +p[0], f: +p[1] }); });
       else {
         const n = { t, d, chord: m[1] };
         if (m[4].indexOf('^') >= 0) n.dir = 'up';
@@ -742,6 +757,114 @@ const LESSONS = [
   { id: 'f4', w: 4, bpm: 76, title: 'Riff et accords', text: 'Deux notes de basse, puis l’accord. Tout ce que tu as appris jusqu’ici, dans la même phrase.',
     notes: seq('6:0/2 6:0/2 6:3 Em*2 | 5:0/2 5:0/2 5:3 Am*2 | 6:0/2 6:3/2 5:0/2 5:2/2 Em*2 | 6:3 6:0 Em*2') },
 ];
+
+/* ---------- Airs célèbres (domaine public), en trois niveaux ---------- */
+const SONG_LEVELS = [{ name: 'Simple' }, { name: 'Moyen' }, { name: 'Compliqué' }];
+const SONGS = (() => {
+  /* accords partiels : la note la plus aiguë est la note de la mélodie */
+  const Cc = '5:3+4:2+3:0+2:1', Cg = '5:3+4:2+3:0+2:1+1:3', Ca = '5:3+4:2+3:2';
+  const Gd = '6:3+5:2+4:0+3:0+2:3', Gb = '6:3+5:2+4:0+3:0+2:0', Gg = '6:3+5:2+4:0+3:0', Ga = '6:3+5:2+4:0+3:2', Fa = '4:3+3:2';
+  const tol = [{ timingMs: 130, cents: 40 }, { timingMs: 115, cents: 35 }, { timingMs: 105, cents: 30 }];
+  const mk = (id, i, title, bpm, text, notes, bpb) => ({ id, w: i === 2 ? 2 : 1, bpm, beatsPerBar: bpb || 4, title: `${title} (${SONG_LEVELS[i].name.toLowerCase()})`, text, tolerance: tol[i], notes: seq(notes) });
+
+  /* Hymne à la joie, en Do : Mi Fa Sol sur la 1re corde, Do Ré sur la 2e, Sol grave sur la 3e */
+  const hA = '1:0 1:0 1:1 1:3 | 1:3 1:1 1:0 2:3 | 2:1 2:1 2:3 1:0 |', hEndA = ' 1:0*1.5 2:3/2 2:3*2 |', hEndB = ' 2:3*1.5 2:1/2 2:1*2 |';
+  const hC = ' 2:3 2:3 1:0 2:1 | 2:3 1:0/2 1:1/2 1:0 2:1 | 2:3 1:0/2 1:1/2 1:0 2:3 | 2:1 2:3 3:0*2 |';
+  const kA = `C 1:0 1:1 1:3 | G 1:1 1:0 2:3 | ${Cc} 2:1 2:3 1:0 |`, kEndA = ` C*1.5 2:3/2 ${Gd}*2 |`, kEndB = ` ${Gd}*1.5 2:1/2 ${Cc}*2 |`;
+  const kC = ` ${Gd} 2:3 1:0 2:1 | ${Gd} 1:0/2 1:1/2 1:0 2:1 | ${Gd} 1:0/2 1:1/2 1:0 2:3 | ${Cc} 2:3 ${Gg}*2 |`;
+  const hymne = [
+    mk('h1', 0, 'Hymne à la joie', 76, 'Les deux premières phrases, une note par temps, sur les deux cordes fines. Ce sont les notes des leçons « Mi, Fa, Sol » et « Si, Do, Ré ».',
+      hA + ' 1:0 2:3 2:3*2 | ' + hA + ' 2:3 2:1 2:1*2'),
+    mk('h2', 1, 'Hymne à la joie', 96, 'Le thème entier, avec la note pointée en fin de phrase et les croches de la troisième phrase.',
+      hA + hEndA + hA + hEndB + hC + hA + hEndB),
+    mk('h3', 2, 'Hymne à la joie', 88, 'Au premier temps de chaque mesure, gratte l’accord de Do ou de Sol en t’arrêtant sur la corde de la mélodie, puis joue les notes suivantes une à une.',
+      kA + kEndA + kA + kEndB + kC + kA + kEndB),
+  ];
+
+  /* Joyeux anniversaire, en Do, à trois temps, avec la levée sur le troisième temps */
+  const lev = ' 3:0/2 3:0/2 |';
+  const anniv = [
+    mk('a1', 0, 'Joyeux anniversaire', 72, 'La mesure a trois temps. Les deux premières notes, courtes, arrivent sur le troisième : compte « un, deux », puis joue.',
+      '- -' + lev + ' 3:2 3:0 2:1 | 2:0*2' + lev + ' 3:2 3:0 2:3 | 2:1*2' + lev + ' 1:3 1:0 2:1 | 2:0 3:2 1:1/2 1:1/2 | 1:0 2:1 2:3 | 2:1*3', 3),
+    mk('a2', 1, 'Joyeux anniversaire', 100, 'La même mélodie au tempo. Sur les trois notes longues, gratte l’accord de Sol ou de Do au lieu de la note seule.',
+      '- -' + lev + ` 3:2 3:0 2:1 | ${Gb}*2` + lev + ` 3:2 3:0 2:3 | ${Cc}*2` + lev + ` 1:3 1:0 2:1 | 2:0 3:2 1:1/2 1:1/2 | 1:0 2:1 2:3 | ${Cc}*3`, 3),
+    mk('a3', 2, 'Joyeux anniversaire', 92, 'Un accord au premier temps de chaque mesure, toujours arrêté sur la corde de la mélodie. Le petit accord de Fa (cordes 4 et 3) tombe sur le deuxième temps.',
+      '- -' + lev + ` ${Ca} 3:0 2:1 | ${Gb}*2` + lev + ` ${Ga} 3:0 2:3 | ${Cc}*2` + lev + ` ${Cg} 1:0 2:1 | 2:0 ${Fa} 1:1/2 1:1/2 | C 2:1 ${Gd} | ${Cc}*3`, 3),
+  ];
+  /* Las Mañanitas, en Do, à trois temps : chaque vers part de deux notes de levée et finit sur une note longue */
+  const Ff = '4:3+3:2+2:1+1:1', G7 = '6:3+5:2+4:0+3:0+2:0+1:1';
+  const mA = '- 3:0 3:0 | 2:1*2 2:1 | 2:0 2:1 2:3 | 2:3*3 | - 2:0 2:1 | 2:3*2 1:0 | 2:1 2:3 1:0 | 1:1*3 | - 1:1 1:1 | 1:0*2 2:3 | 2:1 2:0 2:3 | 2:1*3 | - 2:0 2:1 | 2:3*2 1:0 | 1:1*2 2:3 | 2:1*3 |';
+  const nA = `- 3:0 3:0 | 2:1*2 2:1 | 2:0 2:1 2:3 | ${Gd}*3 | - 2:0 2:1 | 2:3*2 1:0 | 2:1 2:3 1:0 | 1:1*3 | - 1:1 1:1 | 1:0*2 2:3 | 2:1 2:0 2:3 | ${Cc}*3 | - 2:0 2:1 | 2:3*2 1:0 | 1:1*2 2:3 | ${Cc}*3 |`;
+  const nB = ` - 1:0 2:3 | 2:0*2 2:0 | 2:1 2:3 1:0 | ${Cc}*3 | - 1:0 2:3 | 2:0*2 2:0 | 2:1*2 2:3 | C*3 | - 2:1 2:1 | 1:1*2 1:1 | 1:3 1:1 1:0 | ${Cc}*3 | - 2:0 2:1 | 2:3*2 1:0 | 1:1*2 2:3 | ${Cc}*3`;
+  const pA = `- 3:0 3:0 | ${Cc}*2 2:1 | ${Gb} 2:1 2:3 | ${Gd}*3 | - 2:0 2:1 | ${Gd}*2 1:0 | ${Cc} 2:3 1:0 | ${Ff}*3 | - 1:1 1:1 | C*2 2:3 | ${Cc} 2:0 2:3 | ${Cc}*3 | - 2:0 2:1 | ${Gd}*2 1:0 | ${G7}*2 2:3 | ${Cc}*3 |`;
+  const pB = ` - 1:0 2:3 | ${Gb}*2 2:0 | ${Cc} 2:3 1:0 | ${Cc}*3 | - 1:0 2:3 | ${Gb}*2 2:0 | ${Cc}*2 2:3 | C*3 | - 2:1 2:1 | ${Ff}*2 1:1 | ${Cg} 1:1 1:0 | ${Cc}*3 | - 2:0 2:1 | ${Gd}*2 1:0 | ${G7}*2 2:3 | ${Cc}*3`;
+  const mananitas = [
+    mk('m1', 0, 'Las Mañanitas', 84, 'Le premier couplet, « Estas son las mañanitas ». Chaque vers part de deux notes de levée, sur les temps deux et trois, et se pose sur une note longue.', mA, 3),
+    mk('m2', 1, 'Las Mañanitas', 100, 'Les deux couplets. À la fin de chaque vers, remplace la note longue par l’accord de Sol ou de Do, arrêté sur la corde de la mélodie.', nA + nB, 3),
+    mk('m3', 2, 'Las Mañanitas', 92, 'Une valse complète : un accord au premier temps de chaque mesure, dont un petit Fa et un Sol 7, avec la mélodie sur la corde la plus aiguë de l’accord.', pA + pB, 3),
+  ];
+  /* Au clair de la lune, en Do : trois phrases identiques et un pont sur les cordes 3 et 2 */
+  const lA = '2:1 2:1 2:1 2:3 | 1:0*2 2:3*2 | 2:1 1:0 2:3 2:3 | 2:1*4 |', lB = ' 2:3 2:3 2:3 2:3 | 3:2*2 3:2*2 | 2:3 2:1 2:0 3:2 | 3:0*4 |';
+  const lkA = `${Cc} 2:1 2:1 2:3 | C*2 ${Gd}*2 | ${Cc} 1:0 ${Gd} 2:3 | ${Cc}*4 |`, lkB = ` ${Gd} 2:3 2:3 2:3 | 4:0+3:2*2 3:2*2 | ${Gd} 2:1 2:0 3:2 | ${Gg}*4 |`;
+  const lune = [
+    mk('l1', 0, 'Au clair de la lune', 80, 'Les deux premières phrases, identiques : Do, Ré, Mi sur les deux cordes fines. Les notes longues durent deux temps, la dernière quatre.', lA + lA),
+    mk('l2', 1, 'Au clair de la lune', 100, 'La chanson entière. La troisième phrase descend sur la 3ᵉ corde jusqu’au Sol à vide.', lA + lA + lB + lA),
+    mk('l3', 2, 'Au clair de la lune', 92, 'Un accord de Do ou de Sol au début de chaque mesure, arrêté sur la corde de la mélodie ; dans le pont, deux cordes seulement (Ré et La).', lkA + lkA + lkB + lkA),
+  ];
+
+  /* Frère Jacques, en Sol : tout tient entre le Ré grave (4e corde à vide) et le Mi aigu */
+  const fA = '3:0 3:2 2:0 3:0 | 3:0 3:2 2:0 3:0 |', fRun = ' 2:3/2 1:0/2 2:3/2 2:1/2 2:0 3:0 | 2:3/2 1:0/2 2:3/2 2:1/2 2:0 3:0 |';
+  const jacques = [
+    mk('fj1', 0, 'Frère Jacques', 72, 'Quatre petites phrases, chacune jouée deux fois. « Sonnez les matines » va deux fois plus vite : quatre croches, puis deux noires.',
+      fA + ' 2:0 2:1 2:3*2 | 2:0 2:1 2:3*2 |' + fRun + ' 3:0 4:0 3:0*2 | 3:0 4:0 3:0*2'),
+    mk('fj2', 1, 'Frère Jacques', 104, 'Au tempo. Sur chaque note longue (« dormez-vous », « ding, dang, dong »), gratte l’accord de Sol arrêté sur la corde de la mélodie.',
+      fA + ` 2:0 2:1 ${Gd}*2 | 2:0 2:1 ${Gd}*2 |` + fRun + ` 3:0 4:0 ${Gg}*2 | 3:0 4:0 ${Gg}*2`),
+    mk('fj3', 2, 'Frère Jacques', 96, 'L’accord de Sol au premier temps de chaque mesure, sur quatre ou cinq cordes selon la note de mélodie, y compris au départ des croches.',
+      `${Gg} 3:2 2:0 3:0 | ${Gg} 3:2 2:0 3:0 | ${Gb} 2:1 ${Gd}*2 | ${Gb} 2:1 ${Gd}*2 | ${Gd}/2 1:0/2 2:3/2 2:1/2 ${Gb} 3:0 | ${Gd}/2 1:0/2 2:3/2 2:1/2 ${Gb} 3:0 | ${Gg} 4:0 ${Gg}*2 | ${Gg} 4:0 ${Gg}*2`),
+  ];
+
+  /* Vive le vent (Jingle Bells), le refrain, en Do */
+  const jE = '1:0 1:0 1:0*2 | 1:0 1:0 1:0*2 |';
+  const jM = ' 1:0 1:3 2:1*1.5 2:3/2 | 1:0*4 | 1:1 1:1 1:1*1.5 1:1/2 | 1:1 1:0 1:0 1:0/2 1:0/2 |';
+  const jkE = 'C 1:0 1:0*2 | C 1:0 1:0*2 |', jkM = ` C 1:3 2:1*1.5 2:3/2 | C*4 | ${Ff} 1:1 1:1*1.5 1:1/2 | ${Ff} 1:0 1:0 1:0/2 1:0/2 |`;
+  const vent = [
+    mk('j1', 0, 'Vive le vent', 92, 'Le refrain, avec un rythme simplifié : des noires partout, sauf les notes longues. Presque tout se joue sur la 1ʳᵉ corde.',
+      jE + ' 1:0 1:3 2:1 2:3 | 1:0*4 | 1:1 1:1 1:1 1:1 | 1:1 1:0 1:0 1:0 | 1:0 2:3 2:3 1:0 | 2:3*2 1:3*2 | ' + jE + ' 1:0 1:3 2:1 2:3 | 1:0*4 | 1:1 1:1 1:1 1:1 | 1:1 1:0 1:0 1:0 | 1:3 1:3 1:1 2:3 | 2:1*4'),
+    mk('j2', 1, 'Vive le vent', 116, 'Le refrain avec son vrai rythme : une note pointée suivie d’une croche, et deux croches en fin de sixième mesure.',
+      jE + jM + ' 1:0 2:3 2:3 1:0 | 2:3*2 1:3*2 | ' + jE + jM + ' 1:3 1:3 1:1 2:3 | 2:1*4'),
+    mk('j3', 2, 'Vive le vent', 104, 'L’accord de Do au début des mesures, un petit Fa (quatre cordes) sur « oh, what fun », puis Sol et Sol 7 pour finir.',
+      jkE + jkM + ` 1:0 ${Gd} 2:3 1:0 | ${Gd}*2 G*2 | ` + jkE + jkM + ` G 1:3 ${G7} 2:3 | ${Cc}*4`),
+  ];
+
+  /* La Cucaracha, en Sol, dans sa forme traditionnelle à trois temps : trois notes de levée, une longue, une brève */
+  const cP = '4:0 4:0 4:0 |';
+  const cMid = ' 3:0 3:0 4:4 | 4:4 4:2 4:2 | 4:0*3 |', cEnd = ' 2:3 1:0 2:3 | 2:1 2:0 3:2 |';
+  const cucaracha = [
+    mk('c1x', 0, 'La Cucaracha', 112, 'La mélodie commence sur la 4ᵉ corde : à vide, case 2 et case 4 (auriculaire). Trois notes égales, une longue, une brève.',
+      cP + ' 3:0*2 2:0 | ' + cP + ' 3:0*2 2:0 |' + cMid + ' -*3 | ' + cP + ' 4:4*2 3:2 | ' + cP + ' 4:4*2 3:2 |' + cEnd + ' 3:0*3', 3),
+    mk('c2x', 1, 'La Cucaracha', 152, 'Au tempo d’un corrido. Dans la mesure de silence au milieu, gratte l’accord de Ré ; à la fin, celui de Sol.',
+      cP + ' 3:0*2 2:0 | ' + cP + ' 3:0*2 2:0 |' + cMid + ' D*3 | ' + cP + ' 4:4*2 3:2 | ' + cP + ' 4:4*2 3:2 |' + cEnd + ' 3:0*3 | G*3', 3),
+    mk('c3x', 2, 'La Cucaracha', 144, 'Un accord sur chaque note longue : Sol sur quatre cordes, puis La à vide avec le Fa dièse pour « porque no tiene », et un Ré sur trois cordes avant la descente finale.',
+      cP + ` ${Gg}*2 2:0 | ` + cP + ` ${Gg}*2 2:0 | ${Gg} 3:0 4:4 | 4:4 4:2 4:2 | 4:0*3 | D*3 | ` + cP + ' 5:0+4:4*2 3:2 | ' + cP + ' 5:0+4:4*2 3:2 | 4:0+3:2+2:3 1:0 2:3 | 2:1 2:0 3:2 | ' + `${Gg}*3 | G*3`, 3),
+  ];
+  return [
+    { id: 'anniv', title: 'Joyeux anniversaire', by: 'Mélodie de Mildred et Patty Hill, 1893', versions: anniv,
+      what: ['La mélodie seule, lentement.', 'Au tempo, avec un accord sur les notes longues.', 'Un accord à chaque mesure, la mélodie par-dessus.'] },
+    { id: 'mananitas', title: 'Las Mañanitas', by: 'Chanson traditionnelle mexicaine', versions: mananitas,
+      what: ['Le premier couplet, la mélodie seule.', 'Les deux couplets, avec un accord sur les notes longues.', 'Un accord à chaque mesure, la mélodie par-dessus.'] },
+    { id: 'cucaracha', title: 'La Cucaracha', by: 'Chanson traditionnelle mexicaine', versions: cucaracha,
+      what: ['La mélodie seule, lentement.', 'Au tempo, avec un accord dans le silence et à la fin.', 'Un accord sur chaque note longue.'] },
+    { id: 'lune', title: 'Au clair de la lune', by: 'Chanson traditionnelle française, XVIIIᵉ siècle', versions: lune,
+      what: ['Les deux premières phrases.', 'La chanson entière, au tempo.', 'Un accord à chaque mesure, la mélodie par-dessus.'] },
+    { id: 'jacques', title: 'Frère Jacques', by: 'Chanson traditionnelle française, XVIIIᵉ siècle', versions: jacques,
+      what: ['La mélodie seule, lentement.', 'Au tempo, avec un accord sur les notes longues.', 'Un accord à chaque mesure, croches comprises.'] },
+    { id: 'vent', title: 'Vive le vent', by: 'Jingle Bells, James Pierpont, 1857', versions: vent,
+      what: ['Le refrain, en rythme simplifié.', 'Le refrain avec son vrai rythme.', 'Un accord à chaque mesure, la mélodie par-dessus.'] },
+    { id: 'hymne', title: 'Hymne à la joie', by: 'Ludwig van Beethoven, 9ᵉ symphonie, 1824', versions: hymne,
+      what: ['Les deux premières phrases, une note par temps.', 'Le thème entier, avec son vrai rythme.', 'Un accord à chaque mesure, la mélodie par-dessus.'] },
+  ];
+})();
+const SONG_LESSONS = SONGS.reduce((a, s) => a.concat(s.versions), []);
 
 /* Transforme une leçon (JSON) en événements jouables. */
 function compile(lesson) {
@@ -886,8 +1009,10 @@ class Judge {
       else run = 0;
     }
     if (run < 3 || fr[start].t < this.minT) return null;
-    const fb = start >= 6 ? fr[start - 6] : null;
-    if (fb && fb.conf >= 0.6 && Math.abs((fb.midi - e.midi) * 100) <= 60) return null;   // la note sonnait déjà
+    for (let q = start - 6; q >= 0 && q >= start - 30; q--) {   // la note sonnait déjà dans les 350 ms précédentes : ce n'est pas un départ
+      const fb = fr[q];
+      if (fb.conf >= 0.6 && Math.abs((fb.midi - e.midi) * 100) <= 60) return null;
+    }
     const ts = fr[start].t;
     for (const o of an.onsets) if (o.t > ts - 0.15 && o.t <= ts && o.t - this.offset < lo) return null;   // pincée trop tôt
     const dt = Math.max(-this.W, Math.min(this.W, ts - 0.035 - this.offset - e.time));
@@ -1037,7 +1162,7 @@ const Store = {
     return { cur: n, today: ok(dayKey()) };
   },
   totalSec() { let s = 0; for (const d in this.s.days) s += this.s.days[d]; return s; },
-  totalStars() { let s = 0; for (const l of LESSONS) s += (this.s.progress[l.id] || {}).stars || 0; return s; },
+  totalStars() { let s = 0; for (const l of LESSONS.concat(SONG_LESSONS)) s += (this.s.progress[l.id] || {}).stars || 0; return s; },
 };
 
 /* ---------- Temps de pratique ---------- */
@@ -1211,7 +1336,7 @@ const Sheet = {
 };
 
 /* ---------- Leçons ---------- */
-const allLessons = () => LESSONS.concat(Store.lessons());
+const allLessons = () => LESSONS.concat(SONG_LESSONS, Store.lessons());
 const findLesson = (id) => allLessons().find((l) => l.id === id);
 const starsOf = (id) => (Store.s.progress[id] || {}).stars || 0;
 const isUnlocked = (i) => i <= 0 || Store.s.prefs.unlockAll || starsOf(LESSONS[i - 1].id) >= 1;
@@ -1255,6 +1380,7 @@ function tabSVG(lesson, cls) {
 
 const Views = {};
 let openWorlds = null;
+const openSongs = new Set();
 Views.lecons = () => {
   const nx = nextLesson(), st = Store.streak(), total = Store.totalStars();
   if (!openWorlds) openWorlds = new Set([nx.w]);
@@ -1273,6 +1399,11 @@ Views.lecons = () => {
         return `<li><button class="row" data-lesson="${l.id}"${un ? '' : ' data-locked'}><span class="row-t">${esc(l.title)}</span><span class="row-s" aria-label="${un ? starsOf(l.id) + ' étoiles sur 3' : 'verrouillée'}">${un ? starsHTML(starsOf(l.id)) : ICON.lock}</span></button></li>`;
       }).join('') + `</ol><p class="p-tol">Tolérance : ±${tol.ms} ms sur le rythme, ±${tol.cents} cents sur la justesse.</p></details></section>`;
   });
+  h += `<section class="songs"><h2>Airs célèbres</h2><p class="note">Des mélodies du domaine public, chacune en trois niveaux. Elles sont ouvertes dès le début.</p>` + SONGS.map((sg) => {
+    const got = sg.versions.reduce((s, l) => s + starsOf(l.id), 0);
+    return `<details class="song" data-song="${sg.id}"${openSongs.has(sg.id) ? ' open' : ''}><summary><span class="song-t">${esc(sg.title)}<small>${esc(sg.by)}</small></span><span class="chip num" aria-label="${got} étoiles sur 9">${ICON.star}${got}/9</span></summary>`
+      + sg.versions.map((l, i) => `<button class="row" data-lesson="${l.id}"><span class="row-t">${SONG_LEVELS[i].name}<small>${esc(sg.what[i])}</small></span><span class="row-s" aria-label="${starsOf(l.id)} étoiles sur 3">${starsHTML(starsOf(l.id))}</span></button>`).join('') + `</details>`;
+  }).join('') + `</section>`;
   const mine = Store.lessons();
   h += `<section class="mine"><h2>Mes leçons</h2>` + (mine.length
     ? `<div>` + mine.map((l) => `<button class="row" data-lesson="${esc(l.id)}"><span class="row-t">${esc(l.title)}</span><span class="row-s">${starsHTML(starsOf(l.id))}</span></button>`).join('') + `</div>`
@@ -1282,6 +1413,7 @@ Views.lecons = () => {
 Views.lecons.mount = (root) => {
   root.addEventListener('click', (e) => { const b = e.target.closest('[data-lesson]'); if (b) openLesson(b.dataset.lesson); });
   $$('details[data-w]', root).forEach((d) => d.addEventListener('toggle', () => { const w = +d.dataset.w; if (d.open) openWorlds.add(w); else openWorlds.delete(w); }));
+  $$('details[data-song]', root).forEach((d) => d.addEventListener('toggle', () => { if (d.open) openSongs.add(d.dataset.song); else openSongs.delete(d.dataset.song); }));
 };
 
 function openLesson(id) {
@@ -1469,6 +1601,8 @@ const Game = {
       Store.s.progress[L.id] = p; Store.save();
     }
     this.nextL = pass && !this.partial && idx >= 0 && idx < LESSONS.length - 1 ? LESSONS[idx + 1] : null;
+    const song = SONGS.find((sg) => sg.versions.indexOf(L) >= 0);
+    if (song && pass && !this.partial) this.nextL = song.versions[song.versions.indexOf(L) + 1] || null;
     const tend = s.meanDt > 15 ? 'plutôt en retard' : s.meanDt < -15 ? 'plutôt en avance' : 'bien centré';
     let h = '<div class="res">';
     if (!this.partial) h += `<div class="res-stars" role="img" aria-label="${stars} étoiles sur 3">${starsHTML(stars)}</div>`;
@@ -1484,7 +1618,7 @@ const Game = {
       h += `<p class="note">Tes notes arrivent toutes environ ${Math.abs(ms)} ms ${ms > 0 ? 'en retard' : 'en avance'}. Un décalage aussi régulier vient en général du téléphone, pas de toi.</p><div class="actions"><button class="btn small" data-a="lat" data-ms="${ms}">Corriger la latence de ${Math.abs(ms)} ms</button></div>`;
     }
     h += '<div class="actions">';
-    if (this.nextL) h += `<button class="btn primary" data-a="next">Leçon suivante</button><button class="btn" data-a="restart">Rejouer</button>`;
+    if (this.nextL) h += `<button class="btn primary" data-a="next">${song ? 'Niveau suivant' : 'Leçon suivante'}</button><button class="btn" data-a="restart">Rejouer</button>`;
     else if (pass || this.partial) h += `<button class="btn primary" data-a="restart">Rejouer</button>`;
     else h += `<button class="btn primary" data-a="restart">Réessayer</button>` + (this.speed > 0.55 ? `<button class="btn" data-a="slow">Réessayer plus lentement</button>` : '');
     h += `<button class="btn" data-a="quit">Retour aux leçons</button></div></div>`;
@@ -1885,7 +2019,7 @@ Views.profil = () => {
   return `<h1>Profil</h1>
     <div class="streak"><b class="num">${st.cur}</b><span>${st.cur > 1 ? 'jours d’affilée' : st.cur === 1 ? 'jour de pratique' : 'jour pour l’instant'}</span><small>${st.today ? 'La journée compte déjà.' : st.cur ? 'Une minute de pratique aujourd’hui prolonge la série.' : 'Une minute de pratique suffit pour lancer une série.'} Record : ${Store.s.bestStreak || 0}.</small></div>
     <div class="week" aria-label="Sept derniers jours">${week.map((w) => `<div${w.today ? ' class="today"' : ''}><i${w.on ? ' class="on"' : ''}></i>${w.l}</div>`).join('')}</div>
-    <dl class="stats"><div><dd class="num">${hrs ? hrs + ' h ' + pad2(min) : min + ' min'}</dd><dt>de pratique</dt></div><div><dd class="num">${Store.totalStars()}/${LESSONS.length * 3}</dd><dt>étoiles</dt></div><div><dd class="num">${doneN}/${LESSONS.length}</dd><dt>leçons réussies</dt></div></dl>
+    <dl class="stats"><div><dd class="num">${hrs ? hrs + ' h ' + pad2(min) : min + ' min'}</dd><dt>de pratique</dt></div><div><dd class="num">${Store.totalStars()}/${(LESSONS.length + SONG_LESSONS.length) * 3}</dd><dt>étoiles</dt></div><div><dd class="num">${doneN}/${LESSONS.length}</dd><dt>leçons réussies</dt></div></dl>
     <section class="settings"><h2>Réglages</h2>
       <div class="opt"><label for="p-lat">Latence du micro</label><output class="num" id="p-latv">${Store.dev.latIn} ms</output><input type="range" id="p-lat" min="0" max="300" step="5" value="${Store.dev.latIn}"><span class="hint">${Store.dev.calibrated ? 'Mesurée sur ce téléphone.' : 'Valeur par défaut, pas encore mesurée.'} Si tes notes sont jugées « en retard » alors que tu joues en place, augmente-la.</span></div>
       <div class="actions"><button class="btn small" id="p-cal">Mesurer la latence</button></div>
