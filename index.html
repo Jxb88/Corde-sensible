@@ -158,6 +158,28 @@ button { cursor: pointer; }
 .legend { font-size: .8125rem; line-height: 1.7; margin-top: 4px; }
 .fg { display: inline-grid; place-items: center; width: 18px; height: 18px; margin: 0 4px 0 6px; border-radius: 50%; border: 1px solid var(--ink); font: 700 .75rem/1 var(--fd); vertical-align: -3px; }
 .fg:first-child { margin-left: 0; }
+.fg.sym { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+
+/* ---- manche animé ---- */
+.board { display: block; width: 100%; height: auto; overflow: visible; }
+.board .fgr { transition: transform .6s cubic-bezier(.3, .8, .3, 1), opacity .35s; }
+.board .fgr.stay rect { stroke: var(--ok); stroke-width: 3; }
+.board .fgr.slide rect { stroke: var(--accent); stroke-width: 3; stroke-dasharray: 4 2.5; }
+.ch-board { width: min(210px, 58vw); margin: 6px auto 2px; }
+.ch-phase { text-align: center; font: 700 1.25rem/1.2 var(--fd); color: var(--ink2); min-height: 1.3em; }
+.ch-phase.to { color: var(--ink); }
+.ch-steps { list-style: none; margin: 8px 0 4px; padding: 0; }
+.ch-steps li { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border-radius: 10px; color: var(--ink2); transition: background .2s, color .2s; }
+.ch-steps li .fg { flex: none; margin: 2px 0 0; }
+.ch-steps li.on { background: var(--surface); color: var(--ink); font-weight: 600; }
+.ch-steps li.done { color: var(--ink); }
+.ch-steps li.tip { color: var(--ink); background: var(--band); }
+.chips2 { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 4px; }
+.chips2 button { min-height: 40px; padding: 0 14px; border-radius: 99px; border: 1.5px solid var(--ink); background: var(--surface); font: 600 1.0625rem/1 var(--fd); }
+.chips2 button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.ch-next h3, .trans h3 { font: 700 1.25rem/1.2 var(--fd); margin: 16px 0 2px; }
+.trans { margin: 0 0 12px; }
+.gc-b { flex: none; width: 88px; }
 
 /* ---- jeu ---- */
 #game { position: fixed; inset: 0; z-index: 30; height: 100%; display: flex; flex-direction: column; background: var(--bg); padding: env(safe-area-inset-top, 0px) 0 env(safe-area-inset-bottom, 0px); }
@@ -1488,17 +1510,16 @@ function stringsText(sh, played) {
   return ss[0] - ss[ss.length - 1] === ss.length - 1 ? `cordes ${ss[0]} à ${ss[ss.length - 1]}` : 'cordes ' + ss.join(', ');
 }
 const chordCard = (sh) => `<button class="cd" data-shape="${esc(sh.key)}"><b>${esc(sh.name || 'Notes')}</b><span>${esc(sh.fr)}${sh.note ? ', ' + esc(sh.note) : ''}</span>${chordSVG(sh)}<small>${stringsText(sh)}</small></button>`;
-const LEGEND = `<p class="note legend">` + [1, 2, 3, 4].map((k) => `<span class="fg" style="background:${FCOL[k]};color:${FINK[k]}">${k}</span>${FINGER_FR[k]}`).join(' ') + `<br>Corde 6 (la plus grosse) à gauche. Un rond : corde à vide. Une croix : corde à ne pas gratter. Touche un accord pour l’entendre.</p>`;
+const LEGEND = `<p class="note legend">` + [1, 2, 3, 4].map((k) => `<span class="fg" style="background:${FCOL[k]};color:${FINK[k]}">${k}</span>${FINGER_FR[k]}`).join(' ') + `<br>Corde 6 (la plus grosse) à gauche. Un rond : corde à vide. Une croix : corde à ne pas gratter. Touche un accord pour voir les doigts se poser, un par un.</p>`;
 function lessonShapes(comp) {
   const seen = new Map();
   for (const e of comp.events) if (e.kind !== 'note' && !seen.has(e.dg.key)) seen.set(e.dg.key, e.dg);
   return Array.from(seen.values());
 }
-function bindChordCards(root, shapes) {
+function bindChordCards(root, shapes, back) {
   root.addEventListener('click', (e) => {
     const b = e.target.closest('[data-shape]'); if (!b) return;
-    const sh = shapes.find((x) => x.key === b.dataset.shape); if (!sh) return;
-    AudioE.ensure().then(() => AudioE.strum(shapeNotes(sh), AudioE.ctx.currentTime + 0.06, 'down')).catch(() => {});
+    if (shapes.some((x) => x.key === b.dataset.shape)) openChord(b.dataset.shape, { list: shapes, back });
   });
 }
 function openChords() {
@@ -1506,7 +1527,198 @@ function openChords() {
   const root = Sheet.open(`<button class="x" data-close aria-label="Fermer">${ICON.x}</button><h2>Doigtés des accords</h2>
     <p>Chaque dessin montre le haut du manche, comme si la guitare était debout devant toi. Les ronds de couleur indiquent quel doigt poser, et dans quelle case.</p>
     <div class="cd-grid">${shapes.map(chordCard).join('')}</div>${LEGEND}`);
-  bindChordCards(root, shapes);
+  bindChordCards(root, shapes, { label: 'Retour aux accords', fn: openChords });
+}
+
+/* ---------- Manche animé : les doigts se posent un par un, ou passent d'un accord à l'autre ---------- */
+const ART = ['', 'l’index', 'le majeur', 'l’annulaire', 'l’auriculaire'];
+const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+/* Doigts d'une forme : pour chaque doigt, les cordes qu'il appuie (plusieurs si petit barré) et la case. */
+function fingersOf(sh, played) {
+  const m = {};
+  for (let i = 0; i < 6; i++) {
+    const k = sh.fingers[i], f = sh.frets[i];
+    if (!k || f <= 0) continue;
+    const s = 6 - i, on = !played || played.indexOf(s) >= 0;
+    if (!m[k]) m[k] = { k, ss: [], f, on: false };
+    m[k].ss.push(s); m[k].on = m[k].on || on;
+  }
+  return m;
+}
+const where = (d) => d.ss.length > 1 ? `les cordes ${d.ss[0]} et ${d.ss[d.ss.length - 1]}, case ${d.f}` : `la corde ${d.ss[0]} (${STRING_FR[d.ss[0] - 1]}), case ${d.f}`;
+const shapeLabel = (sh) => (sh.name || 'Notes') + (sh.note ? ' (' + sh.note.replace(/^avec (le |la )?/, '') + ')' : '');
+function strumText(sh) {
+  const t = stringsText(sh), mutes = sh.frets.map((f, i) => f < 0 ? 6 - i : 0).filter(Boolean);
+  const what = t.startsWith('les') ? t : t.startsWith('corde ') ? 'la ' + t : 'les ' + t;
+  if (!mutes.length || mutes.length > 3) return `Gratte ${what}.`;
+  return `Gratte ${what}, sans toucher ${mutes.length > 1 ? 'les cordes ' + mutes.join(' et ') : 'la corde ' + mutes[0]}.`;
+}
+/* Étapes de pose : de la corde la plus grave à la plus aiguë (le doigt de la basse sert d'appui). */
+function placeSteps(sh) {
+  const m = fingersOf(sh), order = Object.values(m).sort((a, b) => b.ss[0] - a.ss[0] || a.k - b.k);
+  const steps = order.map((d) => ({ k: d.k, text: d.ss.length > 1 ? `Couche ${ART[d.k]} sur ${where(d)} : c’est un petit barré.` : `Pose ${ART[d.k]} sur ${where(d)}.` }));
+  if (!steps.length) steps.push({ k: 0, text: 'Aucun doigt à poser : tout se joue à vide.' });
+  steps.push({ k: -1, text: strumText(sh) });
+  return { order: order.map((d) => d.k), steps };
+}
+/* Ce que fait chaque doigt entre deux accords : reste, glisse, change de corde, se lève ou se pose. */
+function changeSteps(a, b) {
+  const A = fingersOf(a), B = fingersOf(b), steps = [], kind = {};
+  for (let k = 1; k <= 4; k++) {
+    const x = A[k], y = B[k];
+    if (!x && !y) continue;
+    if (x && y && x.ss.join() === y.ss.join() && x.f === y.f) { kind[k] = 'stay'; steps.push({ k, text: `${cap(ART[k])} reste en place, sur ${where(y)}.` }); }
+    else if (x && y && x.ss.join() === y.ss.join()) { kind[k] = 'slide'; steps.push({ k, text: `${cap(ART[k])} glisse le long de la corde ${y.ss[0]}, de la case ${x.f} à la case ${y.f}.` }); }
+    else if (x && y) { kind[k] = 'move'; steps.push({ k, text: `${cap(ART[k])} passe de ${where(x).replace(/ \(.*?\)/, '')} à ${where(y)}.` }); }
+    else if (x) { kind[k] = 'up'; steps.push({ k, text: `${cap(ART[k])} se lève.` }); }
+    else { kind[k] = 'down'; steps.push({ k, text: `${cap(ART[k])} se pose sur ${where(y)}.` }); }
+  }
+  const stay = Object.keys(kind).filter((k) => kind[k] === 'stay'), slide = Object.keys(kind).filter((k) => kind[k] === 'slide');
+  let tip;
+  if (stay.length) tip = `Ne lève pas ${stay.map((k) => ART[k]).join(' ni ')} : ${stay.length > 1 ? 'ils servent' : 'il sert'} de pivot, et le reste de la main tourne autour.`;
+  else if (slide.length) tip = `Garde ${ART[slide[0]]} au contact de la corde et fais-le glisser : il guide toute la main.`;
+  else {
+    const first = Object.values(B).sort((p, q) => q.ss[0] - p.ss[0])[0];
+    tip = first ? `Tous les doigts bougent : lève la main d’un bloc et vise d’abord ${ART[first.k]}, sur la corde ${first.ss[0]}.` : 'Lève tous les doigts : le nouvel accord se joue à vide.';
+  }
+  steps.push({ k: -2, text: tip });
+  steps.push({ k: -1, text: strumText(b) });
+  return { kind, steps };
+}
+
+class Board {
+  constructor(el) {
+    const x0 = 16, dx = 17.6, y0 = 36, dy = 26, X = (i) => x0 + i * dx, FD = 'Barlow Condensed, Arial Narrow, sans-serif';
+    this.X = X; this.y = (f) => y0 + (f - 0.5) * dy; this.timers = [];
+    let s = `<svg class="board" viewBox="0 0 120 148" aria-hidden="true">`;
+    for (let f = 1; f <= 4; f++) s += `<line x1="${X(0)}" x2="${X(5)}" y1="${y0 + f * dy}" y2="${y0 + f * dy}" stroke="var(--ink2)" stroke-width="1.2"/>`;
+    for (let i = 0; i < 6; i++) s += `<line class="bs" x1="${X(i)}" x2="${X(i)}" y1="${y0}" y2="${y0 + 4 * dy}" stroke="var(--staff)" stroke-width="${(2.4 - i * 0.28).toFixed(2)}"/>`;
+    s += `<rect x="${X(0) - 2}" y="${y0 - 4}" width="${5 * dx + 4}" height="5" rx="1.5" fill="var(--ink)"/>`;
+    for (let i = 0; i < 6; i++) s += `<g class="mk" transform="translate(${X(i)} 20)"><circle class="mo" r="5" fill="none" stroke="var(--ink)" stroke-width="1.8" opacity="0"/><path class="mx" d="M-4.5 -4.5l9 9m0-9l-9 9" fill="none" stroke="var(--ink2)" stroke-width="1.8" stroke-linecap="round" opacity="0"/></g>`;
+    for (let k = 1; k <= 4; k++) s += `<rect class="ghost" x="-8.6" y="-8.6" width="17.2" height="17.2" rx="8.6" fill="none" stroke="${FCOL[k]}" stroke-width="2" stroke-dasharray="3 2.4" opacity="0"/>`;
+    for (let k = 1; k <= 4; k++) s += `<g class="fgr" style="opacity:0;transform:translate(60px,0px)"><rect x="-8.6" y="-8.6" width="17.2" height="17.2" rx="8.6" fill="${FCOL[k]}" stroke="var(--ink)" stroke-width="1"/><text x="0" y="4.7" text-anchor="middle" font-family="${FD}" font-weight="700" font-size="13.5" fill="${FINK[k]}">${k}</text></g>`;
+    el.innerHTML = s + '</svg>';
+    this.svg = el.firstChild;
+    this.g = [null].concat(Array.from(this.svg.querySelectorAll('.fgr')));
+    this.gh = [null].concat(Array.from(this.svg.querySelectorAll('.ghost')));
+    this.bs = Array.from(this.svg.querySelectorAll('.bs'));
+    this.mo = Array.from(this.svg.querySelectorAll('.mo')); this.mx = Array.from(this.svg.querySelectorAll('.mx'));
+  }
+  stop() { this.timers.forEach(clearTimeout); this.timers = []; }
+  later(ms, f) { this.timers.push(setTimeout(f, ms)); }
+  /* Place la forme. only : doigts à montrer (les autres restent levés) ; marks : afficher ronds et croix ;
+     kind : classe par doigt (stay, slide) ; instant : sans animation. */
+  set(sh, played, o) {
+    o = o || {};
+    const m = fingersOf(sh, played);
+    for (let k = 1; k <= 4; k++) {
+      const g = this.g[k], d = m[k], show = d && (!o.only || o.only.indexOf(k) >= 0);
+      g.classList.toggle('stay', !!(o.kind && o.kind[k] === 'stay'));
+      g.classList.toggle('slide', !!(o.kind && o.kind[k] === 'slide'));
+      if (!show) { if (o.instant) g.style.transition = 'none'; g.style.opacity = 0; if (o.instant) { void g.getBoundingClientRect(); g.style.transition = ''; } continue; }
+      const xs = d.ss.map((s) => this.X(6 - s)), x1 = Math.min.apply(null, xs), x2 = Math.max.apply(null, xs), w = x2 - x1 + 17.2;
+      g.firstChild.setAttribute('width', w.toFixed(1)); g.lastChild.setAttribute('x', ((x2 - x1) / 2).toFixed(1));
+      const tf = `translate(${x1.toFixed(1)}px,${this.y(d.f).toFixed(1)}px)`;
+      if (o.instant || g.style.opacity === '0') {     // un doigt qui arrive descend d'au-dessus du manche
+        g.style.transition = 'none';
+        g.style.transform = o.instant ? tf : `translate(${x1.toFixed(1)}px,${(this.y(d.f) - 30).toFixed(1)}px)`;
+        if (!o.instant) g.style.opacity = 0;
+        void g.getBoundingClientRect(); g.style.transition = '';
+      }
+      g.style.transform = tf; g.style.opacity = d.on ? 1 : 0.32;
+    }
+    for (let i = 0; i < 6; i++) {
+      const f = sh.frets[i], on = f >= 0 && (!played || played.indexOf(6 - i) >= 0), marks = o.marks !== false;
+      this.mo[i].setAttribute('opacity', marks && on && f === 0 ? 1 : 0);
+      this.mx[i].setAttribute('opacity', marks && !on ? 1 : 0);
+      this.bs[i].setAttribute('opacity', marks && !on ? 0.4 : 1);
+    }
+  }
+  /* Contours pointillés aux anciennes places des doigts qui ont bougé. */
+  ghosts(a, kind) {
+    const m = a ? fingersOf(a) : {};
+    for (let k = 1; k <= 4; k++) {
+      const d = m[k], r = this.gh[k];
+      if (!d || !kind || kind[k] === 'stay') { r.setAttribute('opacity', 0); continue; }
+      const xs = d.ss.map((s) => this.X(6 - s)), x1 = Math.min.apply(null, xs), x2 = Math.max.apply(null, xs);
+      r.setAttribute('width', (x2 - x1 + 17.2).toFixed(1));
+      r.setAttribute('transform', `translate(${x1.toFixed(1)} ${this.y(d.f).toFixed(1)})`); r.setAttribute('opacity', 0.9);
+    }
+  }
+  /* Pose animée : les doigts arrivent un par un, puis les ronds et croix, puis l'accord sonne. */
+  place(sh, onStep, onEnd) {
+    this.stop();
+    const { order } = placeSteps(sh);
+    this.set(sh, null, { only: [], marks: false, instant: true });
+    onStep(-1);
+    order.forEach((k, i) => this.later(500 + i * 1000, () => { this.set(sh, null, { only: order.slice(0, i + 1), marks: false }); onStep(i); }));
+    this.later(500 + order.length * 1000, () => { this.set(sh, null); onStep(Math.max(1, order.length)); if (onEnd) onEnd(); });
+  }
+  /* Changement en boucle : accord de départ, puis les doigts se déplacent vers l'accord d'arrivée. */
+  morph(a, b, kind, onPhase) {
+    this.stop();
+    const loop = () => {
+      this.ghosts(null); this.set(a, null, { kind, instant: true }); onPhase(0);
+      this.later(1500, () => { this.set(b, null, { kind }); onPhase(1); });
+      this.later(2150, () => this.ghosts(a, kind));
+      this.later(4300, loop);
+    };
+    loop();
+  }
+}
+
+const strumShape = (sh) => AudioE.ensure().then(() => AudioE.strum(shapeNotes(sh), AudioE.ctx.currentTime + 0.06, 'down')).catch(() => {});
+/* Fiche d'un accord : la pose pas à pas, et les enchaînements avec les autres accords de la liste. */
+function openChord(key, ctx) {
+  const list = ctx.list, find = (k) => list.find((x) => x.key === k) || SHAPES.find((x) => x.key === k);
+  const a = find(key); if (!a) return;
+  const b = ctx.to ? find(ctx.to) : null;
+  const others = list.filter((x) => x.key !== a.key);
+  const badge = (k) => k > 0 ? `<span class="fg" style="background:${FCOL[k]};color:${FINK[k]}">${k}</span>` : k === -1 ? `<span class="fg sym" aria-hidden="true">↓</span>` : `<span class="fg sym" aria-hidden="true">!</span>`;
+  const info = b ? changeSteps(a, b) : placeSteps(a);
+  const title = b ? `${shapeLabel(a)} → ${shapeLabel(b)}` : shapeLabel(a);
+  const sub = b ? `Du ${a.fr.toLowerCase()} au ${b.fr.toLowerCase()} : regarde quels doigts bougent.` : `${a.fr}${a.note ? ', ' + a.note : ''}. Les doigts se posent dans l’ordre conseillé.`;
+  let board = null;
+  const root = Sheet.open(`<button class="x" data-close aria-label="Fermer">${ICON.x}</button><h2>${esc(title)}</h2><p class="note">${esc(sub)}</p>
+    <div class="ch-board"></div>
+    ${b ? `<p class="ch-phase" id="ch-phase" aria-live="polite"></p>` : ''}
+    <ol class="ch-steps">${info.steps.map((st) => `<li class="${st.k === -2 ? 'tip' : ''}">${badge(st.k)}<span>${esc(st.text)}</span></li>`).join('')}</ol>
+    <div class="actions"><button class="btn" id="ch-again">${b ? 'Écouter les deux' : 'Revoir la pose'}</button>${b ? `<button class="btn" id="ch-learn">Apprendre ${esc(b.name || 'cet accord')}</button>` : `<button class="btn" id="ch-hear">Écouter</button>`}</div>
+    ${others.length ? `<section class="ch-next"><h3>Enchaîner ${esc(shapeLabel(a))} avec</h3><div class="chips2">${others.map((x) => `<button data-to="${esc(x.key)}"${b && x.key === b.key ? ' aria-pressed="true"' : ''}>→ ${esc(shapeLabel(x))}</button>`).join('')}</div></section>` : ''}
+    ${ctx.back ? `<div class="actions"><button class="btn" id="ch-back">${esc(ctx.back.label)}</button></div>` : ''}`, () => board && board.stop());
+  board = new Board($('.ch-board', root));
+  const lis = Array.from(root.querySelectorAll('.ch-steps li'));
+  const run = () => {
+    if (b) {
+      const ph = $('#ch-phase', root);
+      lis.forEach((li) => li.classList.add('done'));
+      board.morph(a, b, info.kind, (i) => { ph.textContent = i ? `Arrivée : ${shapeLabel(b)}` : `Départ : ${shapeLabel(a)}`; ph.classList.toggle('to', !!i); });
+    } else {
+      board.place(a, (i) => lis.forEach((li, j) => { li.classList.toggle('on', j === i); li.classList.toggle('done', j < i); }), () => strumShape(a));
+    }
+  };
+  run();
+  $('#ch-again', root).addEventListener('click', () => {
+    if (!b) { run(); return; }
+    strumShape(a); setTimeout(() => strumShape(b), 900);
+  });
+  if (b) $('#ch-learn', root).addEventListener('click', () => { board.stop(); openChord(b.key, { list, back: ctx.back }); });
+  else $('#ch-hear', root).addEventListener('click', () => strumShape(a));
+  root.addEventListener('click', (e) => {
+    const t = e.target.closest('[data-to]'); if (!t) return;
+    board.stop(); openChord(a.key, { list, back: ctx.back, to: t.dataset.to });
+  });
+  if (ctx.back) $('#ch-back', root).addEventListener('click', () => { board.stop(); ctx.back.fn(); });
+}
+/* Enchaînements d'une leçon, dans l'ordre où ils arrivent. */
+function lessonChanges(comp) {
+  const out = [], seen = new Set(); let prev = null;
+  for (const e of comp.events) {
+    if (e.kind === 'note') continue;
+    if (prev && prev.key !== e.dg.key && prev.name !== e.dg.name) { const id = prev.key + '>' + e.dg.key; if (!seen.has(id)) { seen.add(id); out.push([prev, e.dg]); } }
+    prev = e.dg;
+  }
+  return out.slice(0, 8);
 }
 
 /* Aperçu statique du début de la tablature. */
@@ -1589,8 +1801,10 @@ function openLesson(id) {
   const partial = comp.events.some((e) => e.kind !== 'note' && e.played.length < shapeNotes(e.dg).length);
   const chordsHTML = shapes.length ? `<section class="chords"><h3>${shapes.length > 1 ? 'Accords de cette leçon' : 'Accord de cette leçon'}</h3><div class="cd-row">${shapes.map(chordCard).join('')}</div>${LEGEND}`
     + (partial ? `<p class="note legend">Dans cet air, le geste s’arrête souvent sur la corde de la mélodie : pendant le jeu, le dessin montre quelles cordes gratter.</p>` : '') + `</section>` : '';
+  const changes = lessonChanges(comp);
+  const changesHTML = changes.length ? `<section class="trans"><h3>Changements d’accord</h3><p class="note">Touche un enchaînement pour voir quels doigts restent en place et lesquels se déplacent.</p><div class="chips2">${changes.map(([x, y]) => `<button data-tr="${esc(x.key)}|${esc(y.key)}">${esc(shapeLabel(x))} → ${esc(shapeLabel(y))}</button>`).join('')}</div></section>` : '';
   const root = Sheet.open(`<button class="x" data-close aria-label="Fermer">${ICON.x}</button><h2>${esc(L.title)}</h2>
-    <p>${esc(L.text || 'Leçon créée dans l’éditeur.')}</p>${tabSVG(L, 'tabprev')}${chordsHTML}
+    <p>${esc(L.text || 'Leçon créée dans l’éditeur.')}</p>${tabSVG(L, 'tabprev')}${chordsHTML}${changesHTML}
     <div class="opt"><label for="ls-sp">Vitesse</label><output id="ls-spv"></output><input type="range" id="ls-sp" min="50" max="120" step="5" value="100"><span class="hint" id="ls-hint"></span></div>
     <div class="opt"><span class="lab">Passage</span><span class="val">mesures <span class="step"><button data-st="from" data-d="-1" aria-label="Première mesure, moins">−</button><b id="ls-from"></b><button data-st="from" data-d="1" aria-label="Première mesure, plus">+</button></span> à <span class="step"><button data-st="to" data-d="-1" aria-label="Dernière mesure, moins">−</button><b id="ls-to"></b><button data-st="to" data-d="1" aria-label="Dernière mesure, plus">+</button></span></span></div>
     <div class="opt"><span class="lab">Meilleur score</span><span class="val">${p && p.plays ? p.best + ' %' : 'pas encore jouée'}</span></div>
@@ -1611,7 +1825,12 @@ function openLesson(id) {
     }
   });
   const go = (mode) => { Sheet.close(); Game.start({ lesson: L, mode, speed: st.speed / 100, fromBar: st.from - 1, toBar: st.to }); };
-  bindChordCards(root, shapes);
+  const back = { label: 'Retour à la leçon', fn: () => openLesson(L.id) };
+  bindChordCards(root, shapes, back);
+  root.addEventListener('click', (e) => {
+    const t = e.target.closest('[data-tr]'); if (!t) return;
+    const ab = t.dataset.tr.split('|'); openChord(ab[0], { list: shapes, back, to: ab[1] });
+  });
   $('#ls-listen', root).addEventListener('click', () => go('listen'));
   $('#ls-play', root).addEventListener('click', () => {
     if (!Store.dev.asked && !Store.dev.calibrated) { Store.dev.asked = true; Store.saveDev(); Calib.open(() => go('play')); } else go('play');
@@ -1660,6 +1879,10 @@ const Game = {
     let mg = Infinity; for (let i = 1; i < this.evs.length; i++) mg = Math.min(mg, this.evs[i].beat - this.evs[i - 1].beat);
     this.ppbK = mg < 0.45 ? clamp(0.5 / mg, 1, 1.6) : 1;
     this.chordEvs = this.evs.filter((e) => e.kind !== 'note'); this.hud.hidden = !this.chordEvs.length; this.hudK = -1; this.hudSig = '';
+    if (this.chordEvs.length) {
+      this.hud.innerHTML = `<div class="gc-now"><div class="gc-b"></div><div class="gc-name"><b></b><span></span><span></span></div></div><div class="gc-next"><small>Ensuite</small><div class="gc-nd"></div><b></b></div>`;
+      this.hudBoard = new Board($('.gc-b', this.hud)); this.hudFirst = true;
+    }
     this.on = true; this.done = true; this.paused = false; this.pausePos = -this.countIn * this.spb;
     this.el.hidden = false; this.panel.hidden = true; this.readColors(); this.resize();
     $('#g-name').textContent = L.title;
@@ -1807,8 +2030,11 @@ const Game = {
     const sig = e.sig + '>' + (n ? n.sig : '');
     if (sig === this.hudSig) return;
     this.hudSig = sig;
-    this.hud.innerHTML = `<div class="gc-now">${chordSVG(e.dg, e.played)}<div class="gc-name"><b>${esc(e.dg.name || 'Notes')}</b><span>${esc(e.dg.fr)}</span><span>${stringsText(e.dg, e.played)}</span></div></div>`
-      + (n ? `<div class="gc-next"><small>Ensuite</small>${chordSVG(n.dg, n.played)}<b>${esc(n.dg.name || 'Notes')}</b></div>` : '');
+    this.hudBoard.set(e.dg, e.played, { instant: this.hudFirst }); this.hudFirst = false;
+    const nm = $$('.gc-name > *', this.hud);
+    nm[0].textContent = e.dg.name || 'Notes'; nm[1].textContent = e.dg.fr; nm[2].textContent = stringsText(e.dg, e.played);
+    const nx = $('.gc-next', this.hud); nx.hidden = !n;
+    if (n) { $('.gc-nd', nx).innerHTML = chordSVG(n.dg, n.played); $('b', nx).textContent = n.dg.name || 'Notes'; }
   },
   stopLoops() { clearInterval(this.iv); cancelAnimationFrame(this.raf); AudioE.listeners.delete(this.onAudio); },
   close() {
